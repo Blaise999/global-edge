@@ -22,9 +22,9 @@ function normEmail(email) {
 function normPhone(phone) {
   if (!phone) return "";
   const digits = String(phone).replace(/\D/g, "");
-  if (digits.startsWith("234")) return `+${digits}`;
-  if (digits.length === 11 && digits.startsWith("0")) return `+234${digits.slice(1)}`;
-  if (digits.length === 10) return `+234${digits}`;
+  if (digits.startsWith("44")) return `+${digits}`;
+  if (digits.length === 11 && digits.startsWith("0")) return `+44${digits.slice(1)}`;
+  if (digits.length === 10) return `+44${digits}`;
   return `+${digits}`;
 }
 function escapeRegex(s = "") {
