@@ -36,72 +36,81 @@ app.use(
 
 /* -------------------- CORS -------------------- */
 /**
- * Production: set one of these in your environment on Render:
- *   CORS_ORIGIN=https://yourdomain.com
- *   (or)
- *   CORS_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+ * Env (Render -> Environment):
+ *   NODE_ENV=production
+ *   TRUST_PROXY=1
+ *   CORS_ORIGINS=https://shipglobaledge.com,https://www.shipglobaledge.com,https://globaledge-frontend.vercel.app
  *
- * Dev: localhost origins remain allowed automatically.
+ * You can add more, comma-separated, to CORS_ORIGINS.
+ * Do NOT set PORT on Render; it injects PORT automatically.
  */
-const DEV_DEFAULTS = [
-  "http://127.0.0.1:5173",
-  "http://localhost:5173",
-  "http://127.0.0.1:5174",
-  "http://localhost:5174",
-  "http://127.0.0.1:5175",
-  "http://localhost:5175",
-  "http://127.0.0.1:4173",
-  "http://localhost:4173",
-  "http://127.0.0.1:3000",
-  "http://localhost:3000",
-  "http://127.0.0.1:3001",
-  "http://localhost:3001",
+
+const PROD_ORIGINS = [
+  "https://shipglobaledge.com",
+  "https://www.shipglobaledge.com",
 ];
 
-// read env
-const singleOrigin = (process.env.CORS_ORIGIN || "").trim();
-const listOrigins = (process.env.CORS_ORIGINS || "")
+const DEV_DEFAULTS = [
+  "http://127.0.0.1:5173", "http://localhost:5173",
+  "http://127.0.0.1:5174", "http://localhost:5174",
+  "http://127.0.0.1:5175", "http://localhost:5175",
+  "http://127.0.0.1:4173", "http://localhost:4173",
+  "http://127.0.0.1:3000", "http://localhost:3000",
+  "http://127.0.0.1:3001", "http://localhost:3001",
+];
+
+// read env allow-list (comma separated)
+const envOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
-  .map((s) => s.trim())
+  .map(s => s.trim())
   .filter(Boolean);
 
-// build allowed list
-let allowedOrigins = [...listOrigins];
-if (singleOrigin) allowedOrigins.push(singleOrigin);
+const singleOrigin = (process.env.CORS_ORIGIN || "").trim();
+if (singleOrigin) envOrigins.push(singleOrigin);
 
-// if none provided, fall back to dev defaults; otherwise, in dev add dev defaults to ease testing
-if (allowedOrigins.length === 0) {
-  allowedOrigins = [...DEV_DEFAULTS];
-} else if (process.env.NODE_ENV !== "production") {
-  allowedOrigins = [...new Set([...allowedOrigins, ...DEV_DEFAULTS])];
+// build final set
+const allowedOrigins = new Set([
+  ...PROD_ORIGINS,
+  ...envOrigins,
+  ...(process.env.NODE_ENV !== "production" ? DEV_DEFAULTS : []),
+]);
+
+function isVercelPreview(origin) {
+  try {
+    const host = new URL(origin).hostname;
+    return host.endsWith(".vercel.app");
+  } catch {
+    return false;
+  }
 }
 
-// CORS handler
-app.use(
-  cors({
-    credentials: true,
-    origin(origin, cb) {
-      // allow non-browser clients (curl/postman) which send no Origin
-      if (!origin) return cb(null, true);
+const corsConfig = {
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  origin(origin, cb) {
+    // Allow server-to-server/no-Origin requests
+    if (!origin) return cb(null, true);
 
-      if (allowedOrigins.includes(origin)) return cb(null, true);
+    if (allowedOrigins.has(origin)) return cb(null, true);
+    if (isVercelPreview(origin)) return cb(null, true);
 
-      // allow any localhost:* in non-production
-      if (
-        process.env.NODE_ENV !== "production" &&
-        /^(https?:\/\/)?(localhost|127\.0\.0\.1):\d+$/.test(origin)
-      ) {
-        return cb(null, true);
-      }
+    // In non-prod, allow any localhost:* as a safety net
+    if (
+      process.env.NODE_ENV !== "production" &&
+      /^(https?:\/\/)?(localhost|127\.0\.0\.1):\d+$/.test(origin)
+    ) {
+      return cb(null, true);
+    }
 
-      console.warn("CORS blocked:", origin);
-      return cb(new Error("CORS blocked"));
-    },
-  })
-);
+    console.warn("CORS blocked:", origin);
+    return cb(new Error("CORS blocked"));
+  },
+};
 
-// Ensure preflight succeeds
-app.options("*", cors());
+app.use(cors(corsConfig));
+// Ensure preflight succeeds with same config
+app.options("*", cors(corsConfig));
 
 /* -------------------- Parsers -------------------- */
 // Body parsers (bumped to 2mb for admin JSON editor payloads)
