@@ -2,6 +2,7 @@
 import Shipment from "../../models/Shipment.js";
 import { sendMail } from "../../config/mailer.js";
 import { buildShipmentUpdateEmail } from "../../mail/template.js";
+
 /* ---------- Status helpers ---------- */
 const STATUS_CODES = [
   "CREATED",
@@ -118,15 +119,27 @@ export const getShipmentById = async (req, res) => {
 
 /* ---------- PATCH: /api/admin/shipments/:id ---------- */
 /**
- * body: { status, lastLocation, note, eta, etaAt }
+ * body: { status, lastLocation, note, eta, etaAt, from|origin, to|destination }
  * - Normalizes status to enum code
  * - Validates etaAt and returns 400 if invalid
- * - Appends a timeline entry
+ * - Persists origin/destination (from/to) with aliases
+ * - Appends a timeline entry (auto-describes changes if no explicit note)
  * - (Optional) Auto-notify recipient if EMAIL_AUTO_NOTIFY=1
  */
 export const updateShipment = async (req, res) => {
   try {
-    const { status, lastLocation, note, eta, etaAt } = req.body || {};
+    const {
+      status,
+      lastLocation,
+      note,
+      eta,
+      etaAt,
+      from,
+      to,
+      origin,        // alias for from
+      destination,   // alias for to
+    } = req.body || {};
+
     const s = await Shipment.findById(req.params.id);
     if (!s) return res.status(404).json({ message: "Shipment not found" });
 
@@ -139,7 +152,8 @@ export const updateShipment = async (req, res) => {
       s.status = code;
     }
 
-    if (lastLocation) s.lastLocation = String(lastLocation).trim();
+    // allow clearing by sending empty string; use !== undefined not truthy
+    if (lastLocation !== undefined) s.lastLocation = String(lastLocation).trim();
     if (eta !== undefined) s.eta = String(eta); // keep as text label if provided
 
     if (etaAt !== undefined) {
@@ -150,10 +164,31 @@ export const updateShipment = async (req, res) => {
       s.etaAt = dt;
     }
 
+    // ----- ORIGIN / DESTINATION -----
+    const nextFrom = from !== undefined ? from : origin;
+    const nextTo   = to   !== undefined ? to   : destination;
+
+    const changes = [];
+
+    if (nextFrom !== undefined) {
+      const prev = s.from || "";
+      s.from = String(nextFrom).trim();
+      if (s.from !== prev) changes.push(`Origin: "${prev}" → "${s.from}"`);
+    }
+    if (nextTo !== undefined) {
+      const prev = s.to || "";
+      s.to = String(nextTo).trim();
+      if (s.to !== prev) changes.push(`Destination: "${prev}" → "${s.to}"`);
+    }
+
+    // timeline entry
     s.timeline.push({
       status: s.status || "CREATED",
       at: new Date(),
-      note: note || (lastLocation ? `Location: ${lastLocation}` : "Updated by admin"),
+      note:
+        note
+          || (lastLocation ? `Location: ${lastLocation}` :
+              (changes.length ? changes.join(" | ") : "Updated by admin")),
     });
 
     await s.save();
