@@ -1,7 +1,7 @@
-// src/routes/index.js
-import express from "express";
-import { geocode } from "../controllers/geocodecontroller.js";
+import { Router } from "express";
+import { geocode } from "../controllers/geocodecontroller.js"; // adjust path if yours differs
 
-const router = express.Router();
+const router = Router();
 router.get("/geocode", geocode);
-export default router;
+
+export default router;            // <— default export

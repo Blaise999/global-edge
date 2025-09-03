@@ -17,7 +17,10 @@ import shipmentRoutes from "./routes/shipment.routes.js";
 import emailRoutes from "./routes/email.routes.js";
 import devRoutes from "./routes/dev.routes.js";
 import adminMockRoutes from "./routes/admin/admin.mock.routes.js";
-import apiRouter from "./geocode.routes.js";
+
+// ✅ Geocode router — make sure this file default-exports a router
+//    (e.g. export default router) and that the path + .js extension are correct.
+import geocodeRoutes from "./routes/geocode.routes.js";
 
 // admin routes
 import adminAuthRoutes from "./routes/admin/auth.routes.js";
@@ -36,16 +39,6 @@ app.use(
 );
 
 /* -------------------- CORS -------------------- */
-/**
- * Env (Render -> Environment):
- *   NODE_ENV=production
- *   TRUST_PROXY=1
- *   CORS_ORIGINS=https://shipglobaledge.com,https://www.shipglobaledge.com,https://globaledge-frontend.vercel.app
- *
- * You can add more, comma-separated, to CORS_ORIGINS.
- * Do NOT set PORT on Render; it injects PORT automatically.
- */
-
 const PROD_ORIGINS = [
   "https://shipglobaledge.com",
   "https://www.shipglobaledge.com",
@@ -162,9 +155,11 @@ if (process.env.NODE_ENV !== "production") {
 // public
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/users", userRoutes);
-
 app.use("/api/shipments", shipmentRoutes);
 app.use("/api/email", emailRoutes);
+
+// ✅ Geocode endpoint (e.g. GET /api/geocode?q=Paris,FR)
+app.use("/api", geocodeRoutes);
 
 // admin
 app.use("/api/admin/auth", authLimiter, adminAuthRoutes);
@@ -174,10 +169,8 @@ app.use("/api/admin/users", adminUsersRoutes);
 app.use("/api/admin/users", adminUserDetailsRoutes);
 app.use("/api/admin/shipments", adminShipmentsRoutes);
 
-/* -------------------- 404 + errors -------------------- */
+/* -------------------- 404 + errors (ALWAYS LAST) -------------------- */
 app.use(notFound);
 app.use(errorHandler);
-
-app.use("/api", apiRouter);
 
 export default app;
