@@ -17,6 +17,7 @@ import shipmentRoutes from "./routes/shipment.routes.js";
 import emailRoutes from "./routes/email.routes.js";
 import devRoutes from "./routes/dev.routes.js";
 import adminMockRoutes from "./routes/admin/admin.mock.routes.js";
+import apiRouter from "./geocode.routes.js";
 
 // admin routes
 import adminAuthRoutes from "./routes/admin/auth.routes.js";
@@ -161,6 +162,7 @@ if (process.env.NODE_ENV !== "production") {
 // public
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/users", userRoutes);
+
 app.use("/api/shipments", shipmentRoutes);
 app.use("/api/email", emailRoutes);
 
@@ -175,5 +177,7 @@ app.use("/api/admin/shipments", adminShipmentsRoutes);
 /* -------------------- 404 + errors -------------------- */
 app.use(notFound);
 app.use(errorHandler);
+
+app.use("/api", apiRouter);
 
 export default app;
