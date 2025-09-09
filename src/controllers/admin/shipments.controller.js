@@ -27,10 +27,8 @@ const LABEL_TO_CODE = {
 function normalizeStatus(input) {
   if (!input) return null;
   const raw = String(input).trim();
-  // already a code?
   const up = raw.toUpperCase().replace(/[\s-]+/g, "_");
   if (STATUS_CODES.includes(up)) return up;
-  // common labels
   const lbl = raw.toUpperCase().replace(/[\s_]+/g, " ");
   return LABEL_TO_CODE[lbl] || null;
 }
@@ -48,14 +46,21 @@ function statusLabel(code) {
   }
 }
 
+/* ---------- helpers: map admin body -> template.adminMessage ---------- */
+function extractAdminMessage(body = {}) {
+  // accept simple fields or the nested object
+  const nested = body.adminMessage || {};
+  const text = body.message ?? body.note ?? nested.text;
+  const html = body.messageHtml ?? nested.html;
+  const markdown = body.messageMarkdown ?? nested.markdown;
+  const title = body.messageTitle ?? nested.title ?? "Note from Operations";
+  const placement = (body.messagePlacement ?? nested.placement ?? "after_progress");
+
+  if (!text && !html && !markdown) return null;
+  return { text, html, markdown, title, placement };
+}
+
 /* ---------- LIST: GET /api/admin/shipments ---------- */
-/**
- * Query:
- *   - status=Created|In Transit|Delivered|Exception|all
- *   - q=free text (trackingNumber/from/to/recipientEmail/lastLocation)
- *   - page, limit  (optional; object mode)
- *   - flat=1       (force array mode)
- */
 export const listAllShipments = async (req, res) => {
   try {
     const page  = Math.max(parseInt(req.query.page || "1", 10), 1);
@@ -71,8 +76,6 @@ export const listAllShipments = async (req, res) => {
       if (code) {
         where.status = code;
       } else {
-        // fall back to broad OR if unknown; but your DB stores codes,
-        // so this will usually match nothing (that’s okay).
         where.$or = [
           { status },
           { status: status.toUpperCase() },
@@ -119,12 +122,14 @@ export const getShipmentById = async (req, res) => {
 
 /* ---------- PATCH: /api/admin/shipments/:id ---------- */
 /**
- * body: { status, lastLocation, note, eta, etaAt, from|origin, to|destination }
- * - Normalizes status to enum code
- * - Validates etaAt and returns 400 if invalid
- * - Persists origin/destination (from/to) with aliases
- * - Appends a timeline entry (auto-describes changes if no explicit note)
- * - (Optional) Auto-notify recipient if EMAIL_AUTO_NOTIFY=1
+ * body: {
+ *   status, lastLocation, note, eta, etaAt, from|origin, to|destination,
+ *   // NEW (any of these):
+ *   message, messageHtml, messageMarkdown,
+ *   messageTitle, messagePlacement,
+ *   adminMessage: { html|markdown|text, title, placement },
+ *   notifyNow: boolean // force send even if EMAIL_AUTO_NOTIFY !== "1"
+ * }
  */
 export const updateShipment = async (req, res) => {
   try {
@@ -136,8 +141,9 @@ export const updateShipment = async (req, res) => {
       etaAt,
       from,
       to,
-      origin,        // alias for from
-      destination,   // alias for to
+      origin,
+      destination,
+      notifyNow,
     } = req.body || {};
 
     const s = await Shipment.findById(req.params.id);
@@ -152,9 +158,9 @@ export const updateShipment = async (req, res) => {
       s.status = code;
     }
 
-    // allow clearing by sending empty string; use !== undefined not truthy
+    // allow clearing with empty string
     if (lastLocation !== undefined) s.lastLocation = String(lastLocation).trim();
-    if (eta !== undefined) s.eta = String(eta); // keep as text label if provided
+    if (eta !== undefined) s.eta = String(eta);
 
     if (etaAt !== undefined) {
       const dt = new Date(etaAt);
@@ -193,8 +199,11 @@ export const updateShipment = async (req, res) => {
 
     await s.save();
 
-    // Optional: auto notify on change
-    if (process.env.EMAIL_AUTO_NOTIFY === "1" && s.recipientEmail) {
+    // ----- OPTIONAL: Notify recipient (auto or forced) -----
+    const shouldNotify = (process.env.EMAIL_AUTO_NOTIFY === "1") || !!notifyNow;
+    const adminMsg = extractAdminMessage(req.body); // <— NEW
+
+    if (shouldNotify && s.recipientEmail) {
       try {
         const brand = {
           name: process.env.BRAND_NAME || "GlobalEdge",
@@ -215,7 +224,9 @@ export const updateShipment = async (req, res) => {
             eta: s.eta || (s.etaAt ? new Date(s.etaAt).toLocaleString() : ""),
             url: `${process.env.APP_URL || ""}/track/${s.trackingNumber || String(s._id)}`
           },
-          brand
+          brand,
+          adminMessage: adminMsg || undefined, // <— inject edited body
+          preheader: adminMsg?.text || adminMsg?.markdown || (adminMsg?.html ? "Admin note included." : "Shipment update and live tracking inside.")
         });
 
         await sendMail({
@@ -226,14 +237,13 @@ export const updateShipment = async (req, res) => {
           reply_to: brand.supportEmail
         });
       } catch (e) {
-        // don't fail the admin update if email fails
         console.error("ℹ️ Auto-notify failed:", e?.message || e);
+        // Do not fail the admin update if email fails
       }
     }
 
-    return res.json({ message: "Shipment updated", shipment: s });
+    return res.json({ message: "Shipment updated", shipment: s, notified: shouldNotify && !!s.recipientEmail });
   } catch (err) {
-    // surface Mongoose validation errors as 400s
     if (err?.name === "ValidationError") {
       return res.status(400).json({ message: err.message });
     }
@@ -243,10 +253,18 @@ export const updateShipment = async (req, res) => {
 };
 
 /* ---------- POST NOTIFY: /api/admin/shipments/:id/notify ---------- */
+/**
+ * body may include:
+ *  - subject (override)
+ *  - to (override recipient)
+ *  - message | messageHtml | messageMarkdown
+ *  - messageTitle | messagePlacement
+ *  - adminMessage: { html|markdown|text, title, placement }
+ */
 export const notifyRecipient = async (req, res) => {
   try {
     const { id } = req.params;
-    const { subject, message, to } = req.body || {};
+    const { subject, to } = req.body || {};
 
     const s = await Shipment.findById(id).lean();
     if (!s) return res.status(404).json({ message: "Shipment not found" });
@@ -270,6 +288,8 @@ export const notifyRecipient = async (req, res) => {
       address: process.env.BRAND_ADDRESS || "GlobalEdge Logistics, 21 Wharf Rd, London, UK",
     };
 
+    const adminMsg = extractAdminMessage(req.body); // <— NEW
+
     const { subject: templSubject, html, text } = buildShipmentUpdateEmail({
       user: { firstName: s.recipientName?.split(" ")[0] || "Customer", email: recipient },
       tracking: {
@@ -282,8 +302,8 @@ export const notifyRecipient = async (req, res) => {
         url: `${process.env.APP_URL || ""}/track/${s.trackingNumber || id}`
       },
       brand,
-      // Optional preheader message that includes any admin note
-      preheader: message ? String(message) : "Shipment update and live tracking inside."
+      adminMessage: adminMsg || undefined,
+      preheader: adminMsg?.text || adminMsg?.markdown || (adminMsg?.html ? "Admin note included." : "Shipment update and live tracking inside."),
     });
 
     await sendMail({
