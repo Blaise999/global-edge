@@ -70,12 +70,10 @@ async function findOrCreateUserByContact({ name, email, phone }) {
       name: name || emailLower.split("@")[0],
       email: emailLower,
       password: randomPwd, // satisfies schema requirement
-      // roles: ["prospect"], // uncomment if your schema supports roles
       phone: phoneNorm || undefined,
     });
     return doc;
   } catch (e) {
-    // Don’t block shipment if user creation fails (e.g., extra required fields).
     console.warn("[userLinker] Could not create user; proceeding as guest:", e?.message || e);
     return null;
   }
@@ -137,7 +135,6 @@ function calcFreightRate(freight) {
     perKg = 1.0;
     eta = "12–35 days port-to-door";
   } else {
-    // road
     base = 120;
     perKg = 1.4;
     eta = "2–10 days door-to-door";
@@ -166,6 +163,88 @@ function pickContacts(body) {
       address: normalizeAddress(body.recipientAddress || c.recipientAddress || ""),
     },
   };
+}
+
+/* ----------------------- NEW: robust goods photo + key handling ----------------------- */
+
+const GOODS_MAX = 6;
+
+function normalizeGoodsPhotos(input) {
+  const arr = Array.isArray(input) ? input : [];
+  const out = [];
+
+  for (const p of arr) {
+    if (!p) continue;
+
+    // string URL
+    if (typeof p === "string") {
+      const url = p.trim();
+      if (!url) continue;
+      out.push({ url, name: "Photo", uploadedAt: new Date() });
+      continue;
+    }
+
+    // object
+    if (typeof p === "object" && p.url) {
+      const url = String(p.url).trim();
+      if (!url) continue;
+
+      out.push({
+        url,
+        pathname: p.pathname ? String(p.pathname) : undefined,
+        name: p.name ? String(p.name) : p.pathname ? String(p.pathname) : "Photo",
+        size: p.size != null ? Number(p.size) : undefined,
+        contentType: p.contentType ? String(p.contentType) : undefined,
+        uploadedAt: p.uploadedAt ? new Date(p.uploadedAt) : new Date(),
+      });
+    }
+  }
+
+  return out.slice(0, GOODS_MAX);
+}
+
+function pickGoodsPhotos(body) {
+  // Accept multiple possible shapes (so you don't break later)
+  const direct =
+    body.goodsPhotos ||
+    body.photos ||
+    body.parcel?.goodsPhotos ||
+    body.freight?.goodsPhotos ||
+    body.parcel?.photos ||
+    body.freight?.photos ||
+    body.meta?.goodsPhotos ||
+    [];
+
+  return normalizeGoodsPhotos(direct);
+}
+
+function deriveShipmentKeyFromPhotos(goodsPhotos) {
+  const re = /shipments\/([^/]+)\/goods\//i;
+
+  for (const p of goodsPhotos || []) {
+    const path = p?.pathname || "";
+    const url = p?.url || "";
+
+    const m1 = String(path).match(re);
+    if (m1?.[1]) return m1[1];
+
+    const m2 = String(url).match(re);
+    if (m2?.[1]) return m2[1];
+  }
+  return "";
+}
+
+function pickShipmentKey(body, goodsPhotos) {
+  const key =
+    (body.shipmentKey || "").trim() ||
+    (body.meta?.shipmentKey || "").trim() ||
+    (body.clientPayload || "").trim();
+
+  if (key) return key;
+
+  // If they forgot to send it, pull from blob pathname/url
+  const derived = deriveShipmentKeyFromPhotos(goodsPhotos);
+  return (derived || "").trim();
 }
 
 /* ----------------------- controllers ----------------------- */
@@ -213,6 +292,10 @@ export const createShipment = async (req, res) => {
 
     const contacts = pickContacts(body);
 
+    // ✅ NEW: photos + key (robust)
+    const goodsPhotos = pickGoodsPhotos(body);
+    const shipmentKey = pickShipmentKey(body, goodsPhotos);
+
     const doc = await Shipment.create({
       userId,
       serviceType,
@@ -220,6 +303,10 @@ export const createShipment = async (req, res) => {
       to: toStr,
       recipientEmail: body.recipientEmail,
       recipientAddress: recipientAddress || undefined,
+
+      // ✅ NEW (ideal place): top-level fields
+      shipmentKey: shipmentKey || undefined,
+      goodsPhotos,
 
       parcel:
         serviceType === "parcel"
@@ -256,10 +343,14 @@ export const createShipment = async (req, res) => {
       trackingNumber: generateTrackingNumber(),
       status: "CREATED",
       timeline: [{ status: "CREATED", at: new Date(), note: "Booking created" }],
+
+      // ✅ NEW (fallback): ALSO store in meta so it survives strict schemas
       meta: {
         ...(body.meta || {}),
         source: req.user ? "web_auth" : "web_guest",
-        contacts, // include for UI
+        contacts,
+        shipmentKey: shipmentKey || undefined,
+        goodsPhotos,
       },
     });
 
@@ -307,7 +398,12 @@ export const createShipmentPublic = async (req, res) => {
       email: c.email || c.shipperEmail || body.recipientEmail,
       phone: c.phone || c.shipperPhone,
     });
+
     const contacts = pickContacts(body);
+
+    // ✅ NEW: photos + key (robust)
+    const goodsPhotos = pickGoodsPhotos(body);
+    const shipmentKey = pickShipmentKey(body, goodsPhotos);
 
     const doc = await Shipment.create({
       userId: u?._id || null,
@@ -316,6 +412,10 @@ export const createShipmentPublic = async (req, res) => {
       to: toStr,
       recipientEmail: body.recipientEmail,
       recipientAddress: recipientAddress || undefined,
+
+      // ✅ NEW (ideal place): top-level fields
+      shipmentKey: shipmentKey || undefined,
+      goodsPhotos,
 
       parcel:
         serviceType === "parcel"
@@ -352,10 +452,14 @@ export const createShipmentPublic = async (req, res) => {
       trackingNumber: generateTrackingNumber(),
       status: "CREATED",
       timeline: [{ status: "CREATED", at: new Date(), note: "Booking created" }],
+
+      // ✅ NEW (fallback): ALSO store in meta so it survives strict schemas
       meta: {
         ...(body.meta || {}),
         source: "web_guest",
-        contacts, // include for UI
+        contacts,
+        shipmentKey: shipmentKey || undefined,
+        goodsPhotos,
       },
     });
 
@@ -411,6 +515,18 @@ export const trackByTrackingId = async (req, res) => {
       address: s.recipientAddress || contacts.recipient?.address || "",
     };
 
+    // ✅ NEW: robust goods photos + key (top-level OR meta fallback)
+    const goodsPhotos =
+      (Array.isArray(s.goodsPhotos) && s.goodsPhotos.length ? s.goodsPhotos : null) ||
+      (Array.isArray(s.meta?.goodsPhotos) && s.meta.goodsPhotos.length ? s.meta.goodsPhotos : null) ||
+      [];
+
+    const shipmentKey =
+      (s.shipmentKey && String(s.shipmentKey).trim()) ||
+      (s.meta?.shipmentKey && String(s.meta.shipmentKey).trim()) ||
+      deriveShipmentKeyFromPhotos(goodsPhotos) ||
+      "";
+
     return res.json({
       trackingNumber: s.trackingNumber,
       status: uiStatus,
@@ -445,6 +561,10 @@ export const trackByTrackingId = async (req, res) => {
       // 🔑 full contact blocks for richer UIs
       shipper,
       recipient,
+
+      // ✅ NEW: what your TrackPage needs
+      goodsPhotos,
+      shipmentKey,
 
       updatedAt: s.updatedAt,
       createdAt: s.createdAt,
