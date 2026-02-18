@@ -165,86 +165,54 @@ function pickContacts(body) {
   };
 }
 
-/* ----------------------- NEW: robust goods photo + key handling ----------------------- */
+/* ----------------------- NEW: photos sanitizer (robust) ----------------------- */
 
-const GOODS_MAX = 6;
+const MAX_PHOTOS = 6;
 
-function normalizeGoodsPhotos(input) {
+// Allow blob urls + normal https image urls (don’t be overly strict)
+function isSafeUrl(u = "") {
+  const s = String(u || "");
+  if (!s) return false;
+  if (!/^https?:\/\//i.test(s)) return false;
+  return true;
+}
+
+function sanitizeGoodsPhotos(input) {
   const arr = Array.isArray(input) ? input : [];
   const out = [];
 
   for (const p of arr) {
     if (!p) continue;
 
-    // string URL
+    // allow string url
     if (typeof p === "string") {
-      const url = p.trim();
-      if (!url) continue;
-      out.push({ url, name: "Photo", uploadedAt: new Date() });
+      if (!isSafeUrl(p)) continue;
+      out.push({ url: p, name: "Photo" });
       continue;
     }
 
-    // object
-    if (typeof p === "object" && p.url) {
-      const url = String(p.url).trim();
-      if (!url) continue;
+    // allow object
+    if (typeof p === "object") {
+      const url = p.url || p.href;
+      if (!isSafeUrl(url)) continue;
+
+      const ct = String(p.contentType || p.type || "").toLowerCase();
+      // If ct exists, restrict to images; if ct missing, still allow (some clients omit it)
+      if (ct && !ct.startsWith("image/")) continue;
 
       out.push({
         url,
-        pathname: p.pathname ? String(p.pathname) : undefined,
-        name: p.name ? String(p.name) : p.pathname ? String(p.pathname) : "Photo",
-        size: p.size != null ? Number(p.size) : undefined,
-        contentType: p.contentType ? String(p.contentType) : undefined,
-        uploadedAt: p.uploadedAt ? new Date(p.uploadedAt) : new Date(),
+        name: p.name || p.pathname || "Photo",
+        pathname: p.pathname || "",
+        size: Number(p.size || 0) || 0,
+        contentType: p.contentType || p.type || "",
       });
     }
+
+    if (out.length >= MAX_PHOTOS) break;
   }
 
-  return out.slice(0, GOODS_MAX);
-}
-
-function pickGoodsPhotos(body) {
-  // Accept multiple possible shapes (so you don't break later)
-  const direct =
-    body.goodsPhotos ||
-    body.photos ||
-    body.parcel?.goodsPhotos ||
-    body.freight?.goodsPhotos ||
-    body.parcel?.photos ||
-    body.freight?.photos ||
-    body.meta?.goodsPhotos ||
-    [];
-
-  return normalizeGoodsPhotos(direct);
-}
-
-function deriveShipmentKeyFromPhotos(goodsPhotos) {
-  const re = /shipments\/([^/]+)\/goods\//i;
-
-  for (const p of goodsPhotos || []) {
-    const path = p?.pathname || "";
-    const url = p?.url || "";
-
-    const m1 = String(path).match(re);
-    if (m1?.[1]) return m1[1];
-
-    const m2 = String(url).match(re);
-    if (m2?.[1]) return m2[1];
-  }
-  return "";
-}
-
-function pickShipmentKey(body, goodsPhotos) {
-  const key =
-    (body.shipmentKey || "").trim() ||
-    (body.meta?.shipmentKey || "").trim() ||
-    (body.clientPayload || "").trim();
-
-  if (key) return key;
-
-  // If they forgot to send it, pull from blob pathname/url
-  const derived = deriveShipmentKeyFromPhotos(goodsPhotos);
-  return (derived || "").trim();
+  return out;
 }
 
 /* ----------------------- controllers ----------------------- */
@@ -292,9 +260,11 @@ export const createShipment = async (req, res) => {
 
     const contacts = pickContacts(body);
 
-    // ✅ NEW: photos + key (robust)
-    const goodsPhotos = pickGoodsPhotos(body);
-    const shipmentKey = pickShipmentKey(body, goodsPhotos);
+    // ✅ NEW: pull photos from body (or nested) and store in meta (schema-safe)
+    const goodsPhotos = sanitizeGoodsPhotos(
+      body.goodsPhotos || body.parcel?.goodsPhotos || body.freight?.goodsPhotos || []
+    );
+    const shipmentKey = String(body.shipmentKey || body.meta?.shipmentKey || "").trim();
 
     const doc = await Shipment.create({
       userId,
@@ -303,10 +273,6 @@ export const createShipment = async (req, res) => {
       to: toStr,
       recipientEmail: body.recipientEmail,
       recipientAddress: recipientAddress || undefined,
-
-      // ✅ NEW (ideal place): top-level fields
-      shipmentKey: shipmentKey || undefined,
-      goodsPhotos,
 
       parcel:
         serviceType === "parcel"
@@ -344,13 +310,12 @@ export const createShipment = async (req, res) => {
       status: "CREATED",
       timeline: [{ status: "CREATED", at: new Date(), note: "Booking created" }],
 
-      // ✅ NEW (fallback): ALSO store in meta so it survives strict schemas
       meta: {
         ...(body.meta || {}),
         source: req.user ? "web_auth" : "web_guest",
         contacts,
         shipmentKey: shipmentKey || undefined,
-        goodsPhotos,
+        goodsPhotos, // ✅ stored here so it always persists even if schema is strict
       },
     });
 
@@ -401,9 +366,11 @@ export const createShipmentPublic = async (req, res) => {
 
     const contacts = pickContacts(body);
 
-    // ✅ NEW: photos + key (robust)
-    const goodsPhotos = pickGoodsPhotos(body);
-    const shipmentKey = pickShipmentKey(body, goodsPhotos);
+    // ✅ NEW: save goods photos in meta
+    const goodsPhotos = sanitizeGoodsPhotos(
+      body.goodsPhotos || body.parcel?.goodsPhotos || body.freight?.goodsPhotos || []
+    );
+    const shipmentKey = String(body.shipmentKey || body.meta?.shipmentKey || "").trim();
 
     const doc = await Shipment.create({
       userId: u?._id || null,
@@ -412,10 +379,6 @@ export const createShipmentPublic = async (req, res) => {
       to: toStr,
       recipientEmail: body.recipientEmail,
       recipientAddress: recipientAddress || undefined,
-
-      // ✅ NEW (ideal place): top-level fields
-      shipmentKey: shipmentKey || undefined,
-      goodsPhotos,
 
       parcel:
         serviceType === "parcel"
@@ -453,7 +416,6 @@ export const createShipmentPublic = async (req, res) => {
       status: "CREATED",
       timeline: [{ status: "CREATED", at: new Date(), note: "Booking created" }],
 
-      // ✅ NEW (fallback): ALSO store in meta so it survives strict schemas
       meta: {
         ...(body.meta || {}),
         source: "web_guest",
@@ -501,12 +463,10 @@ export const trackByTrackingId = async (req, res) => {
     const s = await Shipment.findOne({ trackingNumber: tracking }).lean();
     if (!s) return res.status(404).json({ message: "Tracking ID not found" });
 
-    // Title-case status for UI without changing DB stored value
     const uiStatus = String(s.status || "CREATED")
       .toLowerCase()
       .replace(/\b\w/g, (c) => c.toUpperCase());
 
-    // contacts from meta with safe fallbacks
     const contacts = s.meta?.contacts || {};
     const shipper = contacts.shipper || null;
     const recipient = {
@@ -515,17 +475,14 @@ export const trackByTrackingId = async (req, res) => {
       address: s.recipientAddress || contacts.recipient?.address || "",
     };
 
-    // ✅ NEW: robust goods photos + key (top-level OR meta fallback)
+    // ✅ NEW: return goods photos from meta (schema-safe) + fallback shapes
     const goodsPhotos =
-      (Array.isArray(s.goodsPhotos) && s.goodsPhotos.length ? s.goodsPhotos : null) ||
-      (Array.isArray(s.meta?.goodsPhotos) && s.meta.goodsPhotos.length ? s.meta.goodsPhotos : null) ||
+      s.meta?.goodsPhotos ||
+      s.goodsPhotos ||
+      s.photos ||
+      s.parcel?.goodsPhotos ||
+      s.freight?.goodsPhotos ||
       [];
-
-    const shipmentKey =
-      (s.shipmentKey && String(s.shipmentKey).trim()) ||
-      (s.meta?.shipmentKey && String(s.meta.shipmentKey).trim()) ||
-      deriveShipmentKeyFromPhotos(goodsPhotos) ||
-      "";
 
     return res.json({
       trackingNumber: s.trackingNumber,
@@ -554,17 +511,14 @@ export const trackByTrackingId = async (req, res) => {
       currency: s.currency,
       billable: s.billable,
 
-      // 🔑 flat fallbacks the FE reads today
       recipientEmail: s.recipientEmail || recipient.email || "",
       recipientAddress: s.recipientAddress || recipient.address || "",
 
-      // 🔑 full contact blocks for richer UIs
       shipper,
       recipient,
 
-      // ✅ NEW: what your TrackPage needs
+      // ✅ THIS is what your TrackPage is looking for
       goodsPhotos,
-      shipmentKey,
 
       updatedAt: s.updatedAt,
       createdAt: s.createdAt,
